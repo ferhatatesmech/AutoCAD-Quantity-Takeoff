@@ -1,0 +1,170 @@
+(defun c:quantity ( / sset i entity layer len area data opt export-type filepath file item dcl-file f-ptr dcl-id ins-unit unit-str unit-area-str sample-val )
+  (vl-load-com)
+  
+  (setq ins-unit (getvar "INSUNITS"))
+  (cond
+    ((= ins-unit 4) (setq unit-str "mm" unit-area-str "mm²"))
+    ((= ins-unit 5) (setq unit-str "cm" unit-area-str "cm²"))
+    ((= ins-unit 6) (setq unit-str "m" unit-area-str "m²"))
+    (t (setq unit-str "units" unit-area-str "units²"))
+  )
+  
+  (initget "Area Line Exit")
+  (setq opt (getkword "\nSelect an option [Area / Line / Exit] <Line>: "))
+  (if (null opt) (setq opt "Line"))
+  
+  (cond
+    ((equal opt "Exit")
+     (princ "\nOperation cancelled.")
+    )
+    
+    ((equal opt "Area")
+     (princ "\nSelect closed objects or hatches for area takeoff...")
+     (setq sset (ssget '((0 . "*POLYLINE,CIRCLE,HATCH,ELLIPSE,SPLINE"))))
+     (if sset
+       (progn
+         (setq data nil i 0)
+         (repeat (sslength sset)
+           (setq entity (ssname sset i))
+           (setq layer (cdr (assoc 8 (entget entity))))
+           (setq area (vl-catch-all-apply 'vlax-get-property (list (vlax-ename->vla-object entity) 'Area)))
+           (if (not (vl-catch-all-error-p area))
+             (if (assoc layer data)
+               (setq data (subst (cons layer (+ (cdr (assoc layer data)) area)) (assoc layer data) data))
+               (setq data (append data (list (cons layer area))))
+             )
+           )
+           (setq i (1+ i))
+         )
+         
+         (if (and (equal unit-area-str "units²") data)
+           (progn
+             (setq sample-val (cdr (car data)))
+             (cond
+               ((> sample-val 100000.0) (setq unit-area-str "mm²"))
+               ((> sample-val 1000.0) (setq unit-area-str "cm²"))
+               (t (setq unit-area-str "m²"))
+             )
+           )
+         )
+         
+         (if data
+           (progn
+             (setq dcl-file (vl-filename-mktemp "q_area.dcl"))
+             (setq f-ptr (open dcl-file "w"))
+             (write-line "q_dialog : dialog { label = \"Area Takeoff Report\"; : list_box { key = \"r_list\"; width = 60; height = 15; tabs = \"35\"; } ok_only; }" f-ptr)
+             (close f-ptr)
+             (setq dcl-id (load_dialog dcl-file))
+             (if (new_dialog "q_dialog" dcl-id)
+               (progn
+                 (start_list "r_list")
+                 (add_list (strcat "LAYER NAME\tTOTAL AREA (" unit-area-str ")"))
+                 (add_list "============================================================")
+                 (foreach item data (add_list (strcat (car item) "\t" (rtos (cdr item) 2 2))))
+                 (end_list)
+                 (start_dialog)
+                 (unload_dialog dcl-id)
+               )
+             )
+             (vl-file-delete dcl-file)
+           )
+           (princ "\nNo closed area found.")
+         )
+       )
+       (princ "\nNo valid objects selected.")
+     )
+    )
+    
+    ((equal opt "Line")
+     (princ "\nSelect lines for quantity takeoff...")
+     (setq sset (ssget '((0 . "LINE,*POLYLINE,ARC"))))
+     (if sset
+       (progn
+         (setq data nil i 0)
+         (repeat (sslength sset)
+           (setq entity (ssname sset i))
+           (setq layer (cdr (assoc 8 (entget entity))))
+           (setq len (vlax-curve-getDistAtParam entity (vlax-curve-getEndParam entity)))
+           (if len
+             (if (assoc layer data)
+               (setq data (subst (cons layer (+ (cdr (assoc layer data)) len)) (assoc layer data) data))
+               (setq data (append data (list (cons layer len))))
+             )
+           )
+           (setq i (1+ i))
+         )
+         
+         (if (and (equal unit-str "units") data)
+           (progn
+             (setq sample-val (cdr (car data)))
+             (cond
+               ((> sample-val 5000.0) (setq unit-str "mm"))
+               ((> sample-val 150.0) (setq unit-str "cm"))
+               (t (setq unit-str "m"))
+             )
+           )
+         )
+         
+         (initget "Excel Window File")
+         (setq export-type (getkword "\nSelect export format [Excel / Window (Pop-up) / File (TXT)] <Window>: "))
+         (if (null export-type) (setq export-type "Window"))
+         
+         (cond
+           ((equal export-type "Excel")
+            (setq filepath (getfiled "Save as Excel (CSV)" "quantity_report.csv" "csv" 1))
+            (if filepath
+              (progn
+                (setq file (open filepath "w"))
+                (write-line (strcat "Layer Name;Total Length (" unit-str ")") file)
+                (foreach item data (write-line (strcat (car item) ";" (rtos (cdr item) 2 2)) file))
+                (close file)
+                (princ (strcat "\nSuccessfully exported to Excel: " filepath))
+              )
+              (princ "\nNo file selected. Export cancelled.")
+            )
+           )
+           
+           ((equal export-type "File")
+            (setq filepath (getfiled "Save as Text File" "quantity_report.txt" "txt" 1))
+            (if filepath
+              (progn
+                (setq file (open filepath "w"))
+                (write-line (strcat "LAYER NAME               TOTAL LENGTH (" unit-str ")") file)
+                (foreach item data
+                  (write-line (strcat (vl-string-right-trim " " (substr (strcat (car item) "                             ") 1 25)) (rtos (cdr item) 2 2)) file)
+                )
+                (close file)
+                (princ (strcat "\nSuccessfully exported to File: " filepath))
+              )
+              (princ "\nNo file selected. Export cancelled.")
+            )
+           )
+           
+           ((equal export-type "Window")
+            (setq dcl-file (vl-filename-mktemp "q_line.dcl"))
+            (setq f-ptr (open dcl-file "w"))
+            (write-line "q_dialog : dialog { label = \"Quantity Takeoff Report\"; : list_box { key = \"r_list\"; width = 60; height = 15; tabs = \"35\"; } ok_only; }" f-ptr)
+            (close f-ptr)
+            (setq dcl-id (load_dialog dcl-file))
+            (if (new_dialog "q_dialog" dcl-id)
+               (progn
+                 (start_list "r_list")
+                 (add_list (strcat "LAYER NAME\tTOTAL LENGTH (" unit-str ")"))
+                 (add_list "============================================================")
+                 (foreach item data (add_list (strcat (car item) "\t" (rtos (cdr item) 2 2))))
+                 (end_list)
+                 (start_dialog)
+                 (unload_dialog dcl-id)
+               )
+            )
+            (vl-file-delete dcl-file)
+           )
+         )
+       )
+       (princ "\nNo valid lines selected.")
+     )
+    )
+  )
+  (princ)
+)
+(princ)
